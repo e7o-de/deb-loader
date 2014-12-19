@@ -1,0 +1,179 @@
+#!/usr/bin/php
+<?php
+/*
+	Downloader for deb packages with dependencies. Basically it is just a quick-and-dirty script.
+	No advanced software engineering (like unit tests, architecture or OOP at all) involved.
+	
+	You just run it on Ubuntu or Debian (do an apt-get update before run) and it will fetch the
+	latest packages (deb files), including their dependencies, from repository, just reading
+	the information from apt.
+	
+	Contact for questions:
+		sven at e7o.de
+	
+	License:
+		GPLv3 or later.
+		See https://www.gnu.org/copyleft/gpl.html for details.
+	
+	Dependencies:
+		- Requires apt for reading dependencies.
+		- You might have to set execution bit via
+		  chmod +x download
+		- An installed php-cli
+	
+	Example calls:
+		./download libreoffice
+		./download firefox thunderbird
+	
+	Some important packages to begin with:
+		asunder brasero cups easystroke firefox lame libreoffice gimp gnome-system-monitor synaptic vlc wine xfburn
+		oracle-java8-installer openjdk-7-jre-lib
+*/
+
+define('REPLACES', -1);
+define('CONFLICTS', 0);
+define('SUGGESTED', 1);
+define('RECOMMENDED', 2);
+define('REQUIRED', 3);
+define('DOWNLOADED', 4);
+
+// Output helper function
+function show($msg, $level = 0)
+{
+	echo str_repeat(' ', $level * 2) . ($level > 0 ? '- ' : '') . $msg . PHP_EOL;
+}
+
+// Checks the dependency and adds it to the array
+function addDep($package, $type)
+{
+	global $packages;
+	// Do we know about it?
+	if (isset($packages[$package])) {
+		// Yes: Is it more important than previously thought?
+		if ($packages[$package] < $type) {
+			// Overwrite
+			$packages[$package] = $type;
+		}
+	} else {
+		// Just collect, as we don't know it yet
+		$packages[$package] = $type;
+	}
+}
+
+// Actually downloading
+function doDownloads($level)
+{
+	global $packages;
+	global $downloaded;
+	foreach ($packages as $package => $importance) {
+		if ($importance == REPLACES) {
+			if (isset($packages[$package])) {
+				show('Removing as replaced: ' . $package, 2);
+				unset($packages[$package]);
+			}
+		} else if ($importance == $level) {
+			$url = `apt-cache show $package`;
+			$url = substr($url, strpos($url, 'Filename:'));
+			$url = substr(substr($url, 0, strpos($url, PHP_EOL)), 9);
+			show('Downloading ' . $url, 2);
+			`apt-get download $package`;
+			$downloaded++;
+			$packages[$package] = DOWNLOADED;
+		}
+	}
+}
+
+// Init vars
+$packages = [];
+$downloaded = 0;
+
+// Start collecting dependencies
+show('Collecting dependencies');
+for ($i = 1; $i < count($argv); $i++) {
+	$pck = $argv[$i];
+	// Known package?
+	if (isset($packages[$pck])) {
+		// Required?
+		if ($packages[$pck] != REQUIRED) {
+			// No: This should change
+			show('Upgrading to required: ' . $pck, 1);
+			$packages[$pck] = REQUIRED;
+		} else {
+			// Yes, so we don't bother anymore
+			show('Ignoring as already collected: ' . $pck, 1);
+		}
+	} else {
+		// Adding to required list
+		$packages[$pck] = REQUIRED;
+		// Fetching dependencies
+		show('Collecting dependencies: ' . $pck, 1);
+		$deps = `LC_ALL=en apt-cache depends $pck`;
+		$currentType = SUGGESTED;
+		// Processing output
+		foreach (explode(PHP_EOL, $deps) as $line) {
+			$line = trim($line);
+			if (strlen($line) < 2) {
+				continue;
+			}
+			// Weird character, have to look up what's the purpose of it
+			if ($line[0] == '|') {
+				$line = substr($line, 1);
+			}
+			// Split type from package
+			if (strpos($line, ': ') !== false) {
+				// Assign to our constants
+				$line = explode(': ', $line, 2);
+				switch ($line[0]) {
+					case 'Depends':
+					case 'PreDepends':
+						$currentType = REQUIRED;
+						break;
+					case 'Suggests':
+						$currentType = SUGGESTED;
+						break;
+					case 'Recommends':
+						$currentType = RECOMMENDED;
+						break;
+					case 'Conflicts':
+					case 'Breaks':
+						$currentType = CONFLICTS;
+						break;
+					case 'Replaces':
+						$currentType = REPLACES;
+						break;
+				}
+				// Add package if usefull name
+				if ($line[1][0] != '<') {
+					addDep($line[1], $currentType);
+				}
+			} else {
+				// Check if it is broken
+				if ($currentType == CONFLICTS) {
+					// Show warning, don't add
+					if (isset($packages[$currentType])) {
+						show('WARNING: Package ' . $pck . ' has conflict with ' . $line, 1);
+					}
+				} else {
+					// Add to list
+					addDep($line, $currentType);
+				}
+			}
+		}
+	}
+}
+
+// Doing downloads
+show('Downloading packages');
+
+show('Downloading required packages', 1);
+doDownloads(REQUIRED);
+
+show('Downloading recommended packages', 1);
+doDownloads(RECOMMENDED);
+
+show('Downloading suggested packages', 1);
+doDownloads(SUGGESTED);
+
+// Done stuff
+show('Finished tasks');
+show('Downloaded packages: ' . $downloaded, 1);
